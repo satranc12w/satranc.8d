@@ -1,0 +1,1 @@
+# satranc.8d
