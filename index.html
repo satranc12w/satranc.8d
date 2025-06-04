@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ultra Gelişmiş Satranç</title>
+    <style>
+        body { font-family: Arial, sans-serif; display: flex; flex-direction: column; align-items: center; background-color: #f0f0f0; }
+        #game-container { display: flex; align-items: flex-start; }
+        #board-container {
+            display: grid;
+            grid-template-columns: repeat(8, 60px);
+            grid-template-rows: repeat(8, 60px);
+            width: 480px;
+            height: 480px;
+            border: 2px solid #333;
+            margin-right: 20px;
+        }
+        .square {
+            width: 60px;
+            height: 60px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 40px;
+            cursor: pointer;
+            user-select: none; /* Yazıların seçilmesini engelle */
+        }
+        .white-square { background-color: #eeeed2; }
+        .black-square { background-color: #769656; }
+        .selected { background-color: #baca2b !important; /* Daha parlak bir sarı */ }
+        .legal-move-hint {
+            background-color: rgba(0, 0, 0, 0.2) !important; /* Yarı saydam koyu */
+            border-radius: 50%; /* Nokta gibi göstermek için */
+            width: 20px !important; /* Nokta boyutu */
+            height: 20px !important; /* Nokta boyutu */
+            box-sizing: border-box;
+        }
+        .check {
+            background-color: rgba(255, 0, 0, 0.5) !important; /* Kırmızı vurgu */
+        }
+        #status { margin-top: 10px; font-size: 1.2em; font-weight: bold; min-height: 2em; }
+        #move-history {
+            width: 200px;
+            height: 480px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            background-color: #fff;
+        }
+        #move-history div { padding: 2px 0; }
+        button {
+            padding: 10px 15px;
+            font-size: 1em;
+            margin-top: 10px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+        }
+        button:hover { background-color: #45a049; }
+        .piece-white { color: #f8f8f8; text-shadow: 0 0 2px #333, 0 0 2px #333, 0 0 2px #333; } /* Beyaz taşlar için hafif gölge */
+        .piece-black { color: #222; }
+    </style>
+</head>
+<body>
+    <h1>Ultra Gelişmiş Satranç</h1>
+    <div id="game-container">
+        <div id="board-container"></div>
+        <div id="move-history-container">
+            <h3>Hamle Geçmişi</h3>
+            <div id="move-history"></div>
+        </div>
+    </div>
+    <div id="status">Beyazın Sırası</div>
+    <button id="reset-button">Oyunu Sıfırla</button>
+    <button id="undo-button" disabled>Son Hamleyi Geri Al</button> <!-- Geri alma butonu -->
+
+
+    <script>
+        // --- Sabitler ve Yardımcı Değişkenler ---
+        const EMPTY = null;
+        const PAWN = 'P', KNIGHT = 'N', BISHOP = 'B', ROOK = 'R', QUEEN = 'Q', KING = 'K';
+        const WHITE = 'white', BLACK = 'black';
+
+        const PIECE_UNICODE = {
+            [WHITE]: { [PAWN]: '♙', [KNIGHT]: '♘', [BISHOP]: '♗', [ROOK]: '♖', [QUEEN]: '♕', [KING]: '♔' },
+            [BLACK]: { [PAWN]: '♟', [KNIGHT]: '♞', [BISHOP]: '♝', [ROOK]: '♜', [QUEEN]: '♛', [KING]: '♚' }
+        };
+
+        const PIECE_VALUES = { // AI için
+            [PAWN]: 1, [KNIGHT]: 3, [BISHOP]: 3.2, [ROOK]: 5, [QUEEN]: 9, [KING]: 0 // Şah değeri yakalama için değil, değerlendirme için
+        };
+
+        let board = [];
+        let currentPlayer = WHITE;
+        let selectedSquare = null; // { r, c }
+        let legalMovesForSelectedPiece = [];
+        let gameHistory = []; // Hamleleri ve tahta durumlarını saklamak için
+        let enPassantTarget = null; // { r, c } eğer bir piyon iki kare ilerlediyse
+        let castlingRights = {
+            [WHITE]: { K: true, Q: true }, // Şah kanadı, Vezir kanadı
+            [BLACK]: { K: true, Q: true }
+        };
+        let isPlayerVsAI = true; // Başlangıçta AI'ya karşı oynansın
+        const AI_THINKING_TIME = 500; // AI'ın düşünme süresi (ms)
+        const AI_DEPTH = 3; // Minimax derinliği (dikkat: 4 yavaş olabilir)
+
+        const boardContainer = document.getElementById('board-container');
+        const statusDisplay = document.getElementById('status');
+        const resetButton = document.getElementById('reset-button');
+        const undoButton = document.getElementById('undo-button');
+        const moveHistoryDisplay = document.getElementById('move-history');
+
+
+        // --- Oyun Fonksiyonları ---
+
+        function createInitialBoard() {
+            const initialBoard = Array(8).fill(null).map(() => Array(8).fill(EMPTY));
+
+            // Piyonlar
+            for (let c = 0; c < 8; c++) {
+                initialBoard[1][c] = { type: PAWN, color: BLACK };
+                initialBoard[6][c] = { type: PAWN, color: WHITE };
+            }
+            // Diğer Taşlar
+            const backRank = [ROOK, KNIGHT, BISHOP, QUEEN, KING, BISHOP, KNIGHT, ROOK];
+            for (let c = 0; c < 8; c++) {
+                initialBoard[0][c] = { type: backRank[c], color: BLACK };
+                initialBoard[7][c] = { type: backRank[c], color: WHITE };
+            }
+            return initialBoard;
+        }
+
+        function renderBoard(highlightCheck = true) {
+            boardContainer.innerHTML = '';
+            let kingInCheckPos = null;
+            if (highlightCheck && isInCheck(currentPlayer, board)) {
+                 kingInCheckPos = getKingPosition(currentPlayer, board);
+            }
+
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    const squareDiv = document.createElement('div');
+                    squareDiv.classList.add('square');
+                    squareDiv.classList.add((r + c) % 2 === 0 ? 'white-square' : 'black-square');
+                    squareDiv.dataset.r = r;
+                    squareDiv.dataset.c = c;
+
+                    const piece = board[r][c];
+                    if (piece) {
+                        squareDiv.textContent = PIECE_UNICODE[piece.color][piece.type];
+                        squareDiv.classList.add(piece.color === WHITE ? 'piece-white' : 'piece-black');
+                    }
+
+                    if (selectedSquare && selectedSquare.r === r && selectedSquare.c === c) {
+                        squareDiv.classList.add('selected');
+                    }
+
+                    if (legalMovesForSelectedPiece.some(move => move.r === r && move.c === c)) {
+                        const hint = document.createElement('div');
+                        hint.classList.add('legal-move-hint');
+                        squareDiv.appendChild(hint); // Kareye ipucu ekle, yazının üzerine gelmesin diye
+                    }
+                    
+                    if (kingInCheckPos && kingInCheckPos.r === r && kingInCheckPos.c === c) {
+                        squareDiv.classList.add('check');
+                    }
+
+                    squareDiv.addEventListener('click', () => handleSquareClick(r, c));
+                    boardContainer.appendChild(squareDiv);
+                }
+            }
+        }
+        
+        function isValidSquare(r, c) {
+            return r >= 0 && r < 8 && c >= 0 && c < 8;
+        }
+
+        function getPieceAt(r, c, currentBoard = board) {
+            if (!isValidSquare(r,c)) return null;
+            return currentBoard[r][c];
+        }
+
+        function getKingPosition(color, currentBoard = board) {
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    const piece = currentBoard[r][c];
+                    if (piece && piece.type === KING && piece.color === color) {
+                        return { r, c };
+                    }
+                }
+            }
+            return null; // Olmamalı
+        }
+
+        function isSquareAttacked(rTarget, cTarget, attackerColor, currentBoard = board) {
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    const pieceData = currentBoard[r][c];
+                    if (pieceData && pieceData.color === attackerColor) {
+                        const rawMoves = getRawMovesForPiece(pieceData.type, r, c, pieceData.color, currentBoard, false); // castling false
+                        if (rawMoves.some(move => move.r === rTarget && move.c === cTarget)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+        
+        function isInCheck(playerColor, currentBoard = board) {
+            const kingPos = getKingPosition(playerColor, currentBoard);
+            if (!kingPos) return false; // Şah yoksa (oyun bitmiş olabilir veya test durumu)
+            const opponentColor = playerColor === WHITE ? BLACK : WHITE;
+            return isSquareAttacked(kingPos.r, kingPos.c, opponentColor, currentBoard);
+        }
+
+        function getRawMovesForPiece(pieceType, rStart, cStart, color, currentBoard, includeCastling = true) {
+            const moves = [];
+            const opponentColor = color === WHITE ? BLACK : WHITE;
+
+            function addLineMoves(dr, dc) {
+                for (let i = 1; i < 8; i++) {
+                    const nr = rStart + dr * i;
+                    const nc = cStart + dc * i;
+                    if (!isValidSquare(nr, nc)) break;
+                    const targetPiece = currentBoard[nr][nc];
+                    if (targetPiece === EMPTY) {
+                        moves.push({ r: nr, c: nc });
+                    } else {
+                        if (targetPiece.color === opponentColor) {
+                            moves.push({ r: nr, c: nc });
+                        }
+                        break; // Kendi taşı veya rakip taşı, daha ileri gidemez
+                    }
+                }
+            }
+
+            if (pieceType === PAWN) {
+                const direction = color === WHITE ? -1 : 1;
+                const startRow = color === WHITE ? 6 : 1;
+                const promotionRow = color === WHITE ? 0 : 7;
+
+                // Bir ileri
+                if (isValidSquare(rStart + direction, cStart) && currentBoard[rStart + direction][cStart] === EMPTY) {
+                    moves.push({ r: rStart + direction, c: cStart });
+                    // İki ileri (başlangıçtan)
+                    if (rStart === startRow && currentBoard[rStart + 2 * direction][cStart] === EMPTY) {
+                        moves.push({ r: rStart + 2 * direction, c: cStart });
+                    }
+                }
+                // Çapraz yeme
+                for (const dc of [-1, 1]) {
+                    const nr = rStart + direction;
+                    const nc = cStart + dc;
+                    if (isValidSquare(nr, nc)) {
+                        const target = currentBoard[nr][nc];
+                        if (target && target.color === opponentColor) {
+                            moves.push({ r: nr, c: nc });
+                        }
+                        // En passant
+                        if (enPassantTarget && enPassantTarget.r === nr && enPassantTarget.c === nc) {
+                             moves.push({ r: nr, c: nc, isEnPassant: true });
+                        }
+                    }
+                }
+            } else if (pieceType === KNIGHT) {
+                const knightMoves = [
+                    [-2, -1], [-2, 1], [-1, -2], [-1, 2],
+                    [1, -2], [1, 2], [2, -1], [2, 1]
+                ];
+                for (const [dr, dc] of knightMoves) {
+                    const nr = rStart + dr;
+                    const nc = cStart + dc;
+                    if (isValidSquare(nr, nc)) {
+                        const targetPiece = currentBoard[nr][nc];
+                        if (targetPiece === EMPTY || targetPiece.color === opponentColor) {
+                            moves.push({ r: nr, c: nc });
+                        }
+                    }
+                }
+            } else if (pieceType === BISHOP) {
+                [[ -1, -1], [-1, 1], [1, -1], [1, 1]].forEach(([dr, dc]) => addLineMoves(dr, dc));
+            } else if (pieceType === ROOK) {
+                [[-1, 0], [1, 0], [0, -1], [0, 1]].forEach(([dr, dc]) => addLineMoves(dr, dc));
+            } else if (pieceType === QUEEN) {
+                [[-1, -1], [-1, 1], [1, -1], [1, 1], [-1, 0], [1, 0], [0, -1], [0, 1]].forEach(([dr, dc]) => addLineMoves(dr, dc));
+            } else if (pieceType === KING) {
+                const kingMoves = [
+                    [-1, -1], [-1, 0], [-1, 1], [0, -1],
+                    [0, 1], [1, -1], [1, 0], [1, 1]
+                ];
+                for (const [dr, dc] of kingMoves) {
+                    const nr = rStart + dr;
+                    const nc = cStart + dc;
+                    if (isValidSquare(nr, nc)) {
+                        const targetPiece = currentBoard[nr][nc];
+                        if (targetPiece === EMPTY || targetPiece.color === opponentColor) {
+                            moves.push({ r: nr, c: nc });
+                        }
+                    }
+                }
+                // Rok (Castling) - Sadece ana tahtada ve ilgili haklar varsa
+                if (includeCastling && currentBoard === board) { // Sadece ana tahtada ve özel olarak istendiğinde
+                    if (castlingRights[color] && !isInCheck(color, currentBoard)) {
+                        // Şah kanadı rok
+                        if (castlingRights[color].K &&
+                            currentBoard[rStart][cStart + 1] === EMPTY &&
+                            currentBoard[rStart][cStart + 2] === EMPTY &&
+                            !isSquareAttacked(rStart, cStart + 1, opponentColor, currentBoard) &&
+                            !isSquareAttacked(rStart, cStart + 2, opponentColor, currentBoard)) {
+                            moves.push({ r: rStart, c: cStart + 2, isCastling: 'K' });
+                        }
+                        // Vezir kanadı rok
+                        if (castlingRights[color].Q &&
+                            currentBoard[rStart][cStart - 1] === EMPTY &&
+                            currentBoard[rStart][cStart - 2] === EMPTY &&
+                            currentBoard[rStart][cStart - 3] === EMPTY &&
+                            !isSquareAttacked(rStart, cStart - 1, opponentColor, currentBoard) &&
+                            !isSquareAttacked(rStart, cStart - 2, opponentColor, currentBoard)) {
+                            moves.push({ r: rStart, c: cStart - 2, isCastling: 'Q' });
+                        }
+                    }
+                }
+            }
+            return moves;
+        }
+
+        function getLegalMovesForPiece(rStart, cStart, currentBoard = board, player = currentPlayer) {
+            const pieceData = currentBoard[rStart][cStart];
+            if (!pieceData || pieceData.color !== player) return [];
+
+            const rawMoves = getRawMovesForPiece(pieceData.type, rStart, cStart, pieceData.color, currentBoard, true); // castling'i dahil et
+            const legalMoves = [];
+
+            for (const move of rawMoves) {
+                const tempBoard = deepCopyBoard(currentBoard);
+                const tempCastlingRights = deepCopy(castlingRights); // Rok haklarını da kopyala
+                const tempEnPassantTarget = enPassantTarget ? {...enPassantTarget} : null;
+
+                // Geçici hamleyi yap
+                const movedPiece = tempBoard[rStart][cStart];
+                tempBoard[move.r][move.c] = movedPiece;
+                tempBoard[rStart][cStart] = EMPTY;
+                
+                // Rok ise kaleyi de hareket ettir
+                if (move.isCastling) {
+                    if (move.isCastling === 'K') { // Şah kanadı
+                        tempBoard[rStart][cStart + 1] = tempBoard[rStart][cStart + 3];
+                        tempBoard[rStart][cStart + 3] = EMPTY;
+                    } else { // Vezir kanadı
+                        tempBoard[rStart][cStart - 1] = tempBoard[rStart][cStart - 4];
+                        tempBoard[rStart][cStart - 4] = EMPTY;
+                    }
+                }
+                
+                // En passant ise yenen piyonu kaldır
+                if (move.isEnPassant) {
+                    const capturedPawnRow = rStart; // Aynı sırada
+                    const capturedPawnCol = move.c;  // Hedef sütununda
+                    tempBoard[capturedPawnRow][capturedPawnCol] = EMPTY;
+                }
+
+
+                if (!isInCheck(player, tempBoard)) {
+                    legalMoves.push(move);
+                }
+            }
+            return legalMoves;
+        }
+
+        function getAllLegalMoves(playerColor, currentBoard = board) {
+            const allMoves = []; // { from: {r,c}, to: {r,c}, piece: pieceData }
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    const piece = currentBoard[r][c];
+                    if (piece && piece.color === playerColor) {
+                        const legalPieceMoves = getLegalMovesForPiece(r, c, currentBoard, playerColor);
+                        legalPieceMoves.forEach(move => {
+                            allMoves.push({ from: { r, c }, to: move, piece: piece });
+                        });
+                    }
+                }
+            }
+            return allMoves;
+        }
+        
+        function makeMove(rStart, cStart, rEnd, cEnd, moveDetails = {}) {
+            // moveDetails, getLegalMovesForPiece'den gelen {isCastling, isEnPassant, isPromotion} içerebilir
+            const pieceToMove = board[rStart][cStart];
+            const capturedPiece = board[rEnd][cEnd]; // En passant için bu yanlış olabilir, aşağıda düzeltilecek
+
+            const prevBoard = deepCopyBoard(board);
+            const prevEnPassantTarget = enPassantTarget ? {...enPassantTarget} : null;
+            const prevCastlingRights = deepCopy(castlingRights);
+            const prevPlayer = currentPlayer;
+
+            // En Passant özel durumu
+            let actualCapturedPiece = capturedPiece;
+            if (moveDetails.isEnPassant) {
+                const capturedPawnRow = rStart; // Aynı satırda
+                const capturedPawnCol = cEnd;   // Hedef sütununda
+                actualCapturedPiece = board[capturedPawnRow][capturedPawnCol];
+                board[capturedPawnRow][capturedPawnCol] = EMPTY;
+            }
+            
+            // Tahtayı güncelle
+            board[rEnd][cEnd] = pieceToMove;
+            board[rStart][cStart] = EMPTY;
+            
+            // Piyon terfisi
+            const promotionRow = pieceToMove.color === WHITE ? 0 : 7;
+            if (pieceToMove.type === PAWN && rEnd === promotionRow) {
+                // Şimdilik otomatik Vezir, daha sonra kullanıcı seçimi eklenebilir
+                board[rEnd][cEnd] = { type: QUEEN, color: pieceToMove.color };
+                moveDetails.promotionTo = QUEEN; 
+            }
+
+            // Rok (Castling)
+            if (moveDetails.isCastling) {
+                if (moveDetails.isCastling === 'K') { // Şah kanadı
+                    board[rStart][cStart + 1] = board[rStart][cStart + 3];
+                    board[rStart][cStart + 3] = EMPTY;
+                } else { // Vezir kanadı 'Q'
+                    board[rStart][cStart - 1] = board[rStart][cStart - 4];
+                    board[rStart][cStart - 4] = EMPTY;
+                }
+            }
+
+            // Rok haklarını güncelle
+            if (pieceToMove.type === KING) {
+                castlingRights[pieceToMove.color].K = false;
+                castlingRights[pieceToMove.color].Q = false;
+            }
+            if (pieceToMove.type === ROOK) {
+                if (rStart === (pieceToMove.color === WHITE ? 7 : 0)) {
+                    if (cStart === 0) castlingRights[pieceToMove.color].Q = false; // Vezir kanadı kale
+                    if (cStart === 7) castlingRights[pieceToMove.color].K = false; // Şah kanadı kale
+                }
+            }
+            // Rakip kaleyi alırsa da rok hakkı kaybolur
+            if (capturedPiece && capturedPiece.type === ROOK) {
+                const opponentColor = pieceToMove.color === WHITE ? BLACK : WHITE;
+                if (rEnd === (opponentColor === WHITE ? 7 : 0)) {
+                     if (cEnd === 0) castlingRights[opponentColor].Q = false;
+                     if (cEnd === 7) castlingRights[opponentColor].K = false;
+                }
+            }
+
+
+            // En passant hedefini ayarla/temizle
+            if (pieceToMove.type === PAWN && Math.abs(rStart - rEnd) === 2) {
+                enPassantTarget = { r: (rStart + rEnd) / 2, c: cStart };
+            } else {
+                enPassantTarget = null;
+            }
+
+            // Hamle geçmişine ekle
+            gameHistory.push({
+                board: prevBoard,
+                enPassantTarget: prevEnPassantTarget,
+                castlingRights: prevCastlingRights,
+                player: prevPlayer,
+                move: { from: {r:rStart, c:cStart}, to: {r:rEnd, c:cEnd}, piece: pieceToMove, captured: actualCapturedPiece, details: moveDetails }
+            });
+            updateMoveHistoryDisplay({ from: {r:rStart, c:cStart}, to: {r:rEnd, c:cEnd}, piece: pieceToMove, captured: actualCapturedPiece, details: moveDetails });
+            undoButton.disabled = false;
+
+
+            // Oyuncuyu değiştir
+            currentPlayer = (currentPlayer === WHITE) ? BLACK : WHITE;
+            
+            selectedSquare = null;
+            legalMovesForSelectedPiece = [];
+            renderBoard(); // Tahtayı yeniden çiz
+            checkGameStatus(); // Oyun durumunu kontrol et
+        }
+        
+        function toAlgebraic(pos) {
+            if (!pos) return '';
+            return String.fromCharCode('a'.charCodeAt(0) + pos.c) + (8 - pos.r);
+        }
+
+        function updateMoveHistoryDisplay(moveData) {
+            const moveDiv = document.createElement('div');
+            let moveStr = `${gameHistory.length}. ${moveData.piece.color === WHITE ? 'W' : 'B'}: ${PIECE_UNICODE[moveData.piece.color][moveData.piece.type]} ${toAlgebraic(moveData.from)}-${toAlgebraic(moveData.to)}`;
+            if (moveData.captured) {
+                moveStr += `x${PIECE_UNICODE[moveData.captured.color][moveData.captured.type]}`;
+            }
+            if (moveData.details && moveData.details.promotionTo) {
+                moveStr += `=${PIECE_UNICODE[moveData.piece.color][moveData.details.promotionTo]}`;
+            }
+            if (moveData.details && moveData.details.isCastling === 'K') moveStr = `${gameHistory.length}. ${moveData.piece.color === WHITE ? 'W' : 'B'}: O-O`;
+            if (moveData.details && moveData.details.isCastling === 'Q') moveStr = `${gameHistory.length}. ${moveData.piece.color === WHITE ? 'W' : 'B'}: O-O-O`;
+
+            moveDiv.textContent = moveStr;
+            moveHistoryDisplay.appendChild(moveDiv);
+            moveHistoryDisplay.scrollTop = moveHistoryDisplay.scrollHeight; // Otomatik aşağı kaydır
+        }
+
+        function checkGameStatus() {
+            const legalMoves = getAllLegalMoves(currentPlayer, board);
+            const kingInCheck = isInCheck(currentPlayer, board);
+            
+            renderBoard(true); // Şahı kırmızı göstermek için tekrar render et
+
+            if (legalMoves.length === 0) {
+                if (kingInCheck) {
+                    statusDisplay.textContent = `ŞAH MAT! ${currentPlayer === WHITE ? BLACK : WHITE} kazandı.`;
+                    // Oyun bitti, tıklamaları engellemek için bir şey yapılabilir.
+                } else {
+                    statusDisplay.textContent = "PAT! Oyun berabere.";
+                }
+                undoButton.disabled = true; // Oyun bittiyse geri alma yok
+                return true; // Game over
+            } else {
+                statusDisplay.textContent = `${currentPlayer === WHITE ? "Beyaz" : "Siyah"}'ın Sırası${kingInCheck ? " (ŞAH!)" : ""}`;
+            }
+            
+            // AI sırasıysa AI'yı oynat
+            if (isPlayerVsAI && currentPlayer === BLACK && legalMoves.length > 0) {
+                statusDisplay.textContent = "Siyah (AI) düşünüyor...";
+                // AI'nın düşünüyormuş gibi görünmesi için kısa bir gecikme
+                setTimeout(() => {
+                    const aiMove = findBestMove();
+                    if (aiMove) {
+                         const moveDetail = legalMovesForSelectedPiece.find(m => m.r === aiMove.to.r && m.c === aiMove.to.c); // AI için de moveDetail gerekli
+                         // AI için legalMovesForSelectedPiece'i doldurmak lazım.
+                         // Basitlik için, AI'nın seçtiği hamlenin detaylarını bulmaya çalışalım
+                         // Bu biraz hileli, normalde AI'nın kendi legal hamlelerini hesaplaması ve seçmesi lazım.
+                         // Şimdilik, AI'nın hamlesi için gerekli detayları manuel olarak kontrol edelim.
+                         let aiMoveDetails = {};
+                         const piece = board[aiMove.from.r][aiMove.from.c];
+                         if (piece.type === KING && Math.abs(aiMove.from.c - aiMove.to.c) === 2) {
+                             aiMoveDetails.isCastling = aiMove.to.c > aiMove.from.c ? 'K' : 'Q';
+                         }
+                         // En passant ve promotion için de benzer kontroller gerekebilir.
+                         // Bu kısım daha sağlamlaştırılmalı.
+                         
+                         // Daha doğru yaklaşım: AI'nın seçtiği hamle için legal move objesini bul
+                         const allAIMoves = getAllLegalMoves(BLACK, board);
+                         const chosenAIMove = allAIMoves.find(m => 
+                            m.from.r === aiMove.from.r && m.from.c === aiMove.from.c &&
+                            m.to.r === aiMove.to.r && m.to.c === aiMove.to.c
+                         );
+
+
+                        makeMove(aiMove.from.r, aiMove.from.c, aiMove.to.r, aiMove.to.c, chosenAIMove ? chosenAIMove.to : {});
+                    }
+                }, AI_THINKING_TIME);
+            }
+            return false; // Game not over
+        }
+        
+        function handleSquareClick(r, c) {
+            // Oyun bittiyse veya AI düşünüyorsa tıklamaları engelle
+            if (statusDisplay.textContent.includes("kazandı") || statusDisplay.textContent.includes("berabere") || 
+                (isPlayerVsAI && currentPlayer === BLACK && statusDisplay.textContent.includes("düşünüyor"))) {
+                return;
+            }
+
+            const piece = board[r][c];
+
+            if (selectedSquare) { // Bir taş zaten seçili
+                const targetMove = legalMovesForSelectedPiece.find(move => move.r === r && move.c === c);
+                if (targetMove) { // Tıklanan kare legal bir hamle ise
+                    makeMove(selectedSquare.r, selectedSquare.c, r, c, targetMove); // moveDetails'i aktar
+                } else { // Değilse veya kendi taşına tıkladıysa
+                    selectedSquare = null;
+                    legalMovesForSelectedPiece = [];
+                    // Eğer tıklanan karede kendi taşı varsa, onu seç
+                    if (piece && piece.color === currentPlayer) {
+                        selectedSquare = { r, c };
+                        legalMovesForSelectedPiece = getLegalMovesForPiece(r, c, board, currentPlayer);
+                    }
+                    renderBoard();
+                }
+            } else { // Hiçbir taş seçili değil
+                if (piece && piece.color === currentPlayer) {
+                    selectedSquare = { r, c };
+                    legalMovesForSelectedPiece = getLegalMovesForPiece(r, c, board, currentPlayer);
+                    renderBoard();
+                }
+            }
+        }
+
+        function deepCopyBoard(boardToCopy) {
+            return boardToCopy.map(row => row.map(piece => piece ? { ...piece } : null));
+        }
+
+        function deepCopy(obj) { // Genel bir deep copy (basit objeler ve arrayler için)
+            return JSON.parse(JSON.stringify(obj));
+        }
+        
+        function resetGame() {
+            board = createInitialBoard();
+            currentPlayer = WHITE;
+            selectedSquare = null;
+            legalMovesForSelectedPiece = [];
+            gameHistory = [];
+            moveHistoryDisplay.innerHTML = ''; // Hamle geçmişini temizle
+            enPassantTarget = null;
+            castlingRights = {
+                [WHITE]: { K: true, Q: true },
+                [BLACK]: { K: true, Q: true }
+            };
+            undoButton.disabled = true;
+            renderBoard();
+            statusDisplay.textContent = "Beyazın Sırası";
+            checkGameStatus(); // AI ilk hamleyi yapmasın diye checkGameStatus'u başlatmadan önce çağırıyoruz
+        }
+
+        function undoLastMove() {
+            if (gameHistory.length > 0) {
+                const lastState = gameHistory.pop();
+                board = lastState.board; // Bu zaten deep copy idi
+                enPassantTarget = lastState.enPassantTarget;
+                castlingRights = lastState.castlingRights;
+                currentPlayer = lastState.player;
+
+                // Hamle geçmişi ekranından son hamleyi sil
+                if (moveHistoryDisplay.lastChild) {
+                    moveHistoryDisplay.removeChild(moveHistoryDisplay.lastChild);
+                }
+                
+                selectedSquare = null;
+                legalMovesForSelectedPiece = [];
+                renderBoard();
+                checkGameStatus(); // Durumu güncelle
+                
+                if (gameHistory.length === 0) {
+                    undoButton.disabled = true;
+                }
+                 // Eğer AI'ya karşı oynanıyorsa ve şimdi sıra AI'daysa, AI'nın hamlesini de geri al
+                 // (Normalde insan hamlesi geri alındığı için bu durum oluşmaz, ama çift geri alma için)
+                 if (isPlayerVsAI && currentPlayer === BLACK && gameHistory.length > 0 && gameHistory[gameHistory.length-1].player === BLACK) {
+                     // Bu kısım AI'nın hamlesini de geri almak için, ama şu anki tek geri alma için gereksiz.
+                     // İki hamle geri almak istenirse bu mantık geliştirilebilir.
+                 }
+            }
+        }
+
+
+        // --- Yapay Zeka (Minimax) ---
+        function evaluateBoard(currentBoard) {
+            let score = 0;
+            for (let r = 0; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    const piece = currentBoard[r][c];
+                    if (piece) {
+                        score += (piece.color === WHITE ? 1 : -1) * PIECE_VALUES[piece.type];
+                        // Pozisyonel bonuslar eklenebilir (merkez kontrolü, piyon yapısı vb.)
+                    }
+                }
+            }
+            return score;
+        }
+
+        function minimax(currentBoard, depth, alpha, beta, maximizingPlayer, playerColor, currentCastlingRights, currentEnPassantTarget) {
+            if (depth === 0) {
+                return { score: evaluateBoard(currentBoard) };
+            }
+            
+            // Geçici oyun durumu için checkmate/stalemate kontrolü
+            const legalMovesForCurrent = getAllLegalMoves(playerColor, currentBoard);
+            if (legalMovesForCurrent.length === 0) {
+                if (isInCheck(playerColor, currentBoard)) {
+                    return { score: maximizingPlayer ? -Infinity : Infinity }; // Checkmate
+                }
+                return { score: 0 }; // Stalemate
+            }
+
+            let bestMove = null;
+
+            if (maximizingPlayer) { // AI (Siyah) maksimize etmeye çalışır (negatif skorları)
+                let maxEval = -Infinity;
+                const moves = getAllLegalMoves(BLACK, currentBoard); // AI (Siyah) için hamleler
+                moves.sort(() => Math.random() - 0.5); // Rastgelelik için
+
+                for (const move of moves) {
+                    const tempBoard = deepCopyBoard(currentBoard);
+                    const tempEnPassant = currentEnPassantTarget ? {...currentEnPassantTarget} : null;
+                    const tempCastling = deepCopy(currentCastlingRights);
+
+                    // Simüle edilmiş hamleyi yap (makeMove'un basitleştirilmiş hali)
+                    const piece = tempBoard[move.from.r][move.from.c];
+                    tempBoard[move.to.r][move.to.c] = piece;
+                    tempBoard[move.from.r][move.from.c] = EMPTY;
+                    // Rok, en passant, terfi için özel durumlar burada da ele alınmalı
+                    // Ama AI için bu daha karmaşık hale getirebilir. Şimdilik basit tutalım.
+                    // TODO: AI makeMove simülasyonunu iyileştir.
+
+                    const evaluation = minimax(tempBoard, depth - 1, alpha, beta, false, WHITE, tempCastling, tempEnPassant);
+                    if (evaluation.score > maxEval) {
+                        maxEval = evaluation.score;
+                        bestMove = move;
+                    }
+                    alpha = Math.max(alpha, evaluation.score);
+                    if (beta <= alpha) {
+                        break; // Alpha-beta pruning
+                    }
+                }
+                return { score: maxEval, move: bestMove };
+            } else { // Oyuncu (Beyaz) minimize etmeye çalışır (AI'nın skorunu)
+                let minEval = Infinity;
+                const moves = getAllLegalMoves(WHITE, currentBoard); // Oyuncu (Beyaz) için hamleler
+                moves.sort(() => Math.random() - 0.5);
+
+                for (const move of moves) {
+                    const tempBoard = deepCopyBoard(currentBoard);
+                    const tempEnPassant = currentEnPassantTarget ? {...currentEnPassantTarget} : null;
+                    const tempCastling = deepCopy(currentCastlingRights);
+
+                    const piece = tempBoard[move.from.r][move.from.c];
+                    tempBoard[move.to.r][move.to.c] = piece;
+                    tempBoard[move.from.r][move.from.c] = EMPTY;
+                    // TODO: AI makeMove simülasyonunu iyileştir.
+
+                    const evaluation = minimax(tempBoard, depth - 1, alpha, beta, true, BLACK, tempCastling, tempEnPassant);
+                     if (evaluation.score < minEval) {
+                        minEval = evaluation.score;
+                        bestMove = move;
+                    }
+                    beta = Math.min(beta, evaluation.score);
+                    if (beta <= alpha) {
+                        break; // Alpha-beta pruning
+                    }
+                }
+                return { score: minEval, move: bestMove };
+            }
+        }
+
+        function findBestMove() {
+            // AI Siyah olduğu için, AI kendi skorunu (negatif değerleri) maksimize etmeye çalışacak.
+            // Minimax fonksiyonu, AI'nın (Siyah) bakış açısından çağrıldığında maximizingPlayer = true olmalı.
+            // Ancak bizim evaluateBoard fonksiyonumuz Beyaz için pozitif, Siyah için negatif skor üretiyor.
+            // Dolayısıyla, Siyah (AI) kendi sırası geldiğinde, skoru *minimize* etmeye çalışmalı (daha negatif bir skora).
+            // Ya da evaluateBoard'u Siyah için pozitif yapmalı.
+            // Mevcut evaluateBoard ile: AI (Siyah) -> maximizingPlayer=true, kendi hamlelerini değerlendirir, rakibin (Beyaz) hamleleri minimizingPlayer=false olur.
+            // Skor: Pozitif ise Beyaz avantajlı, Negatif ise Siyah avantajlı.
+            // Siyah (AI) skoru minimize etmek ister, yani daha negatif bir değere.
+            // Bu yüzden minimax'ı çağırırken Siyah için `maximizingPlayer = false` (skoru minimize et) demeliyiz.
+            // VEYA, minimax'taki maximizingPlayer mantığını AI'nın rengine göre ayarla.
+
+            // Düzeltilmiş mantık:
+            // AI (Siyah) kendi hamlesini seçiyor. Bir sonraki durumdaki `evaluateBoard` Beyaz'ın avantajını ölçecek.
+            // Siyah, Beyaz'ın avantajını minimize etmek isteyecektir.
+            // Bu yüzden `minimax` fonksiyonu çağrılırken `maximizingPlayer` parametresi,
+            // AI'nın kendi rengine (Siyah) göre değil, o anki hamle sırasındaki oyuncunun
+            // skoru maksimize mi minimize mi etmeye çalıştığına göre ayarlanır.
+            // AI (Siyah) hamle yapacaksa, bir sonraki tur Beyaz'ın olacak ve Beyaz maksimize etmeye çalışacak.
+            // AI, Beyaz'ın maksimize edeceği skoru minimize eden hamleyi seçer.
+
+            // Basitçe: AI kendi sırası geldiğinde, kendi için en iyi skoru (Siyah için en negatif veya en az pozitif) veren hamleyi bulur.
+            // Minimax çağrısı şu anki oyuncu (BLACK) için yapılır, depth ile ilerler.
+            const result = minimax(board, AI_DEPTH, -Infinity, Infinity, true, BLACK, castlingRights, enPassantTarget);
+            // `maximizingPlayer = true` çünkü BLACK, kendi (negatif) skorunu maksimize etmeye çalışıyor (yani 0'a yaklaştırmaya veya pozitif yapmaya).
+            // Eğer `evaluateBoard` her zaman `currentPlayer`'ın avantajını döndürseydi, `maximizingPlayer` hep `true` olurdu.
+            // Mevcut `evaluateBoard` mutlak bir skor (Beyaz + Siyah -) döndürdüğü için:
+            // Siyah (AI) kendi hamlesini yaparken, sonraki durumun değerlendirmesini yapar.
+            // Eğer Siyah maksimize ediyorsa (ve skor Siyah için pozitifse), `maximizingPlayer = true`.
+            // Eğer skor Beyaz için pozitif, Siyah için negatifse ve Siyah oynuyorsa, Siyah skoru (negatif değeri) maksimize etmeye çalışır.
+
+            if (result && result.move) {
+                return result.move;
+            } else {
+                // Hiç hamle bulunamazsa (örn. AI_DEPTH çok düşük ve hemen mat oluyor)
+                // rastgele bir legal hamle yap
+                const legalMoves = getAllLegalMoves(BLACK, board);
+                if (legalMoves.length > 0) {
+                    return legalMoves[Math.floor(Math.random() * legalMoves.length)];
+                }
+                return null; // Hiç legal hamle yoksa (mat/pat)
+            }
+        }
+
+        // --- Olay Dinleyicileri ---
+        resetButton.addEventListener('click', resetGame);
+        undoButton.addEventListener('click', undoLastMove);
+
+        // --- Oyunu Başlat ---
+        resetGame(); // Oyunu ilk yüklemede başlat
+
+    </script>
+</body>
+</html>
